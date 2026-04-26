@@ -8,6 +8,9 @@ from onboarding import router as onboarding_router
 from streak import router as streak_router
 from gap import router as gap_router
 from profile import router as profile_router
+from ai_clone import router as ai_clone_router
+
+
 
 app = FastAPI(title="Ditto API")
 
@@ -20,6 +23,7 @@ app.include_router(onboarding_router)
 app.include_router(streak_router)
 app.include_router(gap_router)
 app.include_router(profile_router)
+app.include_router(ai_clone_router)
 
 @app.get("/")
 def root():

@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import os
 import random
 from database import get_db
-from models import User, AvatarState, IdealSelf, HabitLog
+from models import User, AvatarState, IdealSelf, HabitLog, AIClone
+from ai_clone import grow_ai_clone
 
 router = APIRouter(prefix="/profile", tags=["profile"])
 
@@ -41,11 +42,15 @@ def get_profile(
 ):
     user = get_current_user(token, db)
 
-    # Get avatar state
     avatar = db.query(AvatarState).filter(AvatarState.user_id == user.id).first()
     ideal = db.query(IdealSelf).filter(IdealSelf.user_id == user.id).first()
+    ai_clone = db.query(AIClone).filter(AIClone.user_id == user.id).first()
 
-    # Get streak
+    # Grow AI nemesis
+    if ai_clone:
+        ai_clone = grow_ai_clone(ai_clone, db)
+
+    # Calculate streak
     logs = db.query(
         func.date(HabitLog.date).label("log_date")
     ).filter(
@@ -66,19 +71,18 @@ def get_profile(
         else:
             break
 
-    # Get today's habit count
     today_logs = db.query(HabitLog).filter(
         HabitLog.user_id == user.id,
         func.date(HabitLog.date) == date.today()
     ).count()
 
-    # Build current and ideal clone data
-    current_clone = None
+    # Build all 3 clone data
+    you = None
     ideal_clone = None
-    gap = None
+    ai_nemesis = None
 
     if avatar:
-        current_clone = {
+        you = {
             "sleep": avatar.sleep_morph,
             "physique": avatar.physique_morph,
             "water": avatar.water_morph,
@@ -105,19 +109,47 @@ def get_profile(
             "social": ideal.target_social
         }
 
-    if current_clone and ideal_clone:
-        gaps = {
-            cat: round(ideal_clone[cat] - current_clone[cat], 2)
-            for cat in current_clone
-        }
-        biggest_gap = max(gaps, key=lambda x: gaps[x])
-        gap = {
-            "by_category": gaps,
-            "overall": round(sum(gaps.values()) / len(gaps), 2),
-            "biggest_gap": biggest_gap
+    if ai_clone:
+        ai_nemesis = {
+            "sleep": ai_clone.sleep_morph,
+            "physique": ai_clone.physique_morph,
+            "water": ai_clone.water_morph,
+            "nutrition": ai_clone.nutrition_morph,
+            "mood": ai_clone.mood_morph,
+            "school": ai_clone.school_morph,
+            "work": ai_clone.work_morph,
+            "mindfulness": ai_clone.mindfulness_morph,
+            "screentime": ai_clone.screentime_morph,
+            "social": ai_clone.social_morph
         }
 
-    # Generate today's tasks for categories user has set up
+    # Competition status vs AI nemesis
+    competition = None
+    if you and ai_nemesis:
+        you_avg = sum(you.values()) / len(you)
+        ai_avg = sum(ai_nemesis.values()) / len(ai_nemesis)
+        competition = {
+            "status": "winning" if you_avg >= ai_avg else "losing",
+            "you_average": round(you_avg, 2),
+            "ai_average": round(ai_avg, 2),
+            "message": "You are ahead of your AI nemesis!" if you_avg >= ai_avg else "Your AI nemesis is beating you!"
+        }
+
+    # Gap vs ideal self
+    gap_vs_ideal = None
+    if you and ideal_clone:
+        gaps = {
+            cat: round(ideal_clone[cat] - you[cat], 2)
+            for cat in you
+        }
+        biggest_gap = max(gaps, key=lambda x: gaps[x])
+        gap_vs_ideal = {
+            "by_category": gaps,
+            "overall": round(sum(gaps.values()) / len(gaps), 2),
+            "biggest_gap": biggest_gap,
+            "focus_message": f"Focus on {biggest_gap} to get closer to your ideal self!"
+        }
+
     todays_tasks = {}
     if avatar:
         for category in DEFAULT_TASKS:
@@ -135,9 +167,14 @@ def get_profile(
             "habits_today": today_logs,
             "message": f"{streak} day streak!" if streak > 0 else "Log a habit to start your streak!"
         },
-        "current_clone": current_clone,
-        "ideal_clone": ideal_clone,
-        "gap": gap,
+        "you": you,
+        "ideal_self": ideal_clone,
+        "ai_nemesis": ai_nemesis,
+        "competition": competition,
+        "gap_vs_ideal": gap_vs_ideal,
         "todays_tasks": todays_tasks,
         "onboarded": avatar is not None and ideal is not None
     }
+
+
+# 

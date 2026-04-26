@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 import os
 from database import get_db
-from models import User, AvatarState, IdealSelf
+from models import User, AvatarState, IdealSelf, AIClone
+from ai_clone import grow_ai_clone
 
 router = APIRouter(prefix="/gap", tags=["gap"])
 
@@ -27,49 +28,74 @@ def get_gap_analysis(
 
     avatar = db.query(AvatarState).filter(AvatarState.user_id == user.id).first()
     ideal = db.query(IdealSelf).filter(IdealSelf.user_id == user.id).first()
+    ai_clone = db.query(AIClone).filter(AIClone.user_id == user.id).first()
 
     if not avatar or not ideal:
-        raise HTTPException(
-            status_code=400,
-            detail="Complete onboarding first"
-        )
+        raise HTTPException(status_code=400, detail="Complete onboarding first")
 
-    # Calculate gap for each category
-    categories = {
-        "sleep": (avatar.sleep_morph, ideal.target_sleep),
-        "physique": (avatar.physique_morph, ideal.target_physique),
-        "water": (avatar.water_morph, ideal.target_water),
-        "nutrition": (avatar.nutrition_morph, ideal.target_nutrition),
-        "mood": (avatar.mood_morph, ideal.target_mood),
-        "school": (avatar.school_morph, ideal.target_school),
-        "work": (avatar.work_morph, ideal.target_work),
-        "mindfulness": (avatar.mindfulness_morph, ideal.target_mindfulness),
-        "screentime": (avatar.screentime_morph, ideal.target_screentime),
-        "social": (avatar.social_morph, ideal.target_social)
+    # Grow AI nemesis before comparing
+    if ai_clone:
+        ai_clone = grow_ai_clone(ai_clone, db)
+
+    categories = ["sleep", "physique", "water", "nutrition", "mood",
+                  "school", "work", "mindfulness", "screentime", "social"]
+
+    you = {c: getattr(avatar, f"{c}_morph") for c in categories}
+    ideal_vals = {
+        "sleep": ideal.target_sleep,
+        "physique": ideal.target_physique,
+        "water": ideal.target_water,
+        "nutrition": ideal.target_nutrition,
+        "mood": ideal.target_mood,
+        "school": ideal.target_school,
+        "work": ideal.target_work,
+        "mindfulness": ideal.target_mindfulness,
+        "screentime": ideal.target_screentime,
+        "social": ideal.target_social
     }
+    ai_vals = {c: getattr(ai_clone, f"{c}_morph") for c in categories} if ai_clone else {c: 0.2 for c in categories}
 
-    gaps = {}
-    for category, (current, target) in categories.items():
-        gap = round(target - current, 2)
-        gaps[category] = {
-            "current": current,
-            "target": target,
+    # Gap vs ideal self
+    gap_vs_ideal = {}
+    for c in categories:
+        gap = round(ideal_vals[c] - you[c], 2)
+        gap_vs_ideal[c] = {
+            "you": you[c],
+            "ideal": ideal_vals[c],
             "gap": gap,
-            "percentage_closed": round((current / target * 100) if target > 0 else 100, 1)
+            "percentage_closed": round((you[c] / ideal_vals[c] * 100) if ideal_vals[c] > 0 else 100, 1)
         }
 
-    # Overall gap score
-    total_gap = sum(g["gap"] for g in gaps.values())
-    avg_gap = round(total_gap / len(gaps), 2)
+    # Gap vs AI nemesis
+    gap_vs_ai = {}
+    winning_categories = []
+    losing_categories = []
+    for c in categories:
+        diff = round(you[c] - ai_vals[c], 2)
+        gap_vs_ai[c] = {
+            "you": you[c],
+            "ai_nemesis": ai_vals[c],
+            "difference": diff,
+            "status": "winning" if diff >= 0 else "losing"
+        }
+        if diff >= 0:
+            winning_categories.append(c)
+        else:
+            losing_categories.append(c)
 
-    # Find biggest gap — what to focus on
-    biggest_gap = max(gaps, key=lambda x: gaps[x]["gap"])
+    overall_vs_ai = round(sum(you[c] - ai_vals[c] for c in categories) / len(categories), 2)
 
     return {
-        "gaps": gaps,
-        "overall_gap": avg_gap,
-        "biggest_gap": biggest_gap,
-        "focus_message": f"Focus on {biggest_gap} — it has the most room for improvement!",
-        "current_clone_overall": round(sum(c for c, _ in categories.values()) / len(categories), 2),
-        "ideal_clone_overall": round(sum(t for _, t in categories.values()) / len(categories), 2)
+        "you_overall": round(sum(you.values()) / len(you), 2),
+        "ideal_overall": round(sum(ideal_vals.values()) / len(ideal_vals), 2),
+        "ai_nemesis_overall": round(sum(ai_vals.values()) / len(ai_vals), 2),
+        "gap_vs_ideal": gap_vs_ideal,
+        "gap_vs_ai_nemesis": gap_vs_ai,
+        "competition": {
+            "status": "winning" if overall_vs_ai >= 0 else "losing",
+            "overall_difference": overall_vs_ai,
+            "winning_categories": winning_categories,
+            "losing_categories": losing_categories,
+            "message": "You are ahead of your AI nemesis!" if overall_vs_ai >= 0 else "Your AI nemesis is beating you! Complete more tasks!"
+        }
     }

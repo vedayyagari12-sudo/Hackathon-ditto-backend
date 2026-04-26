@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import List
 import os
 from database import get_db
-from models import User, AvatarState, IdealSelf
+from models import User, AvatarState, IdealSelf, AIClone
 
 router = APIRouter(prefix="/onboarding", tags=["onboarding"])
 
@@ -71,30 +71,39 @@ def setup_onboarding(
         request.goal_description, request.categories, is_goal=True
     )
 
+    # Create or update your avatar (you)
     avatar = db.query(AvatarState).filter(AvatarState.user_id == user.id).first()
     if not avatar:
         avatar = AvatarState(user_id=user.id)
         db.add(avatar)
-
     for category in request.categories:
         setattr(avatar, f"{category}_morph", current_scores[category])
 
+    # Create or update ideal self
     ideal = db.query(IdealSelf).filter(IdealSelf.user_id == user.id).first()
     if not ideal:
         ideal = IdealSelf(user_id=user.id)
         db.add(ideal)
-
     for category in request.categories:
         setattr(ideal, f"target_{category}", goal_scores[category])
+
+    # Create or update AI nemesis — starts at 0.2 same as user
+    ai_clone = db.query(AIClone).filter(AIClone.user_id == user.id).first()
+    if not ai_clone:
+        ai_clone = AIClone(user_id=user.id)
+        db.add(ai_clone)
+    for category in request.categories:
+        setattr(ai_clone, f"{category}_morph", 0.2)
 
     db.commit()
 
     return {
-        "message": "Onboarding complete! Your two clones have been created.",
+        "message": "Onboarding complete! Your three clones have been created.",
         "selected_categories": request.categories,
-        "current_clone": current_scores,
-        "ideal_clone": goal_scores,
-        "gap": {
+        "you": current_scores,
+        "ideal_self": goal_scores,
+        "ai_nemesis": {category: 0.2 for category in request.categories},
+        "gap_vs_ideal": {
             category: round(goal_scores[category] - current_scores[category], 2)
             for category in request.categories
         }
@@ -109,13 +118,14 @@ def get_onboarding_status(
 
     avatar = db.query(AvatarState).filter(AvatarState.user_id == user.id).first()
     ideal = db.query(IdealSelf).filter(IdealSelf.user_id == user.id).first()
+    ai_clone = db.query(AIClone).filter(AIClone.user_id == user.id).first()
 
     if not avatar or not ideal:
         return {"onboarded": False, "message": "User has not completed onboarding"}
 
     return {
         "onboarded": True,
-        "current_clone": {
+        "you": {
             "sleep": avatar.sleep_morph,
             "physique": avatar.physique_morph,
             "water": avatar.water_morph,
@@ -127,7 +137,7 @@ def get_onboarding_status(
             "screentime": avatar.screentime_morph,
             "social": avatar.social_morph
         },
-        "ideal_clone": {
+        "ideal_self": {
             "sleep": ideal.target_sleep,
             "physique": ideal.target_physique,
             "water": ideal.target_water,
@@ -138,5 +148,17 @@ def get_onboarding_status(
             "mindfulness": ideal.target_mindfulness,
             "screentime": ideal.target_screentime,
             "social": ideal.target_social
+        },
+        "ai_nemesis": {
+            "sleep": ai_clone.sleep_morph if ai_clone else 0.2,
+            "physique": ai_clone.physique_morph if ai_clone else 0.2,
+            "water": ai_clone.water_morph if ai_clone else 0.2,
+            "nutrition": ai_clone.nutrition_morph if ai_clone else 0.2,
+            "mood": ai_clone.mood_morph if ai_clone else 0.2,
+            "school": ai_clone.school_morph if ai_clone else 0.2,
+            "work": ai_clone.work_morph if ai_clone else 0.2,
+            "mindfulness": ai_clone.mindfulness_morph if ai_clone else 0.2,
+            "screentime": ai_clone.screentime_morph if ai_clone else 0.2,
+            "social": ai_clone.social_morph if ai_clone else 0.2
         }
     }

@@ -15,6 +15,7 @@ class User(Base):
     habit_logs = relationship("HabitLog", back_populates="user")
     avatar_state = relationship("AvatarState", back_populates="user", uselist=False)
     ideal_self = relationship("IdealSelf", back_populates="user", uselist=False)
+    ai_clone = relationship("AIClone", back_populates="user", uselist=False)
 
 
 class HabitLog(Base):
@@ -69,3 +70,27 @@ class IdealSelf(Base):
     target_social = Column(Float, default=1.0)
     
     user = relationship("User", back_populates="ideal_self")
+
+
+class AIClone(Base):
+    __tablename__ = "ai_clones"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True)
+    
+    # AI Nemesis morph values — grows automatically over time
+    sleep_morph = Column(Float, default=0.2)
+    physique_morph = Column(Float, default=0.2)
+    water_morph = Column(Float, default=0.2)
+    nutrition_morph = Column(Float, default=0.2)
+    mood_morph = Column(Float, default=0.2)
+    school_morph = Column(Float, default=0.2)
+    work_morph = Column(Float, default=0.2)
+    mindfulness_morph = Column(Float, default=0.2)
+    screentime_morph = Column(Float, default=0.2)
+    social_morph = Column(Float, default=0.2)
+    
+    last_grown = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    user = relationship("User", back_populates="ai_clone")
