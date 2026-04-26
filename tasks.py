@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 import os
 import random
 import base64
@@ -12,7 +12,8 @@ from models import User, HabitLog, AvatarState
  
 router = APIRouter(prefix="/tasks", tags=["tasks"])
  
-# Configure Gemini
+# ─── Configure Gemini ─────────────────────────────────────────────────────────
+ 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 gemini = genai.GenerativeModel("gemini-1.5-flash")
  
@@ -71,7 +72,9 @@ DEFAULT_TASKS = {
     ]
 }
  
-# ─── Request Models ───────────────────────────────────────────────────────────
+VALID_CATEGORIES = list(DEFAULT_TASKS.keys())
+ 
+# ─── Request / Response Models ────────────────────────────────────────────────
  
 class TaskGenerateRequest(BaseModel):
     categories: List[str]
@@ -79,27 +82,51 @@ class TaskGenerateRequest(BaseModel):
 class TaskCompleteRequest(BaseModel):
     category: str
     task: str
-    image: str  # base64 encoded JPEG string from Swift
+    image: str  # base64 encoded JPEG string (no newlines) from Swift
  
-# ─── Auth Helper ─────────────────────────────────────────────────────────────
+# ─── Auth Helper ──────────────────────────────────────────────────────────────
  
-def get_current_user(token: str, db: Session):
+def get_current_user(
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db)
+) -> User:
+    """
+    Reads the JWT from the Authorization header.
+    Swift should send:  Authorization: Bearer <token>
+    """
     from jose import JWTError, jwt
+ 
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid Authorization header. Expected: 'Bearer <token>'"
+        )
+ 
+    token = authorization.split(" ", 1)[1].strip()
+ 
     try:
         payload = jwt.decode(token, os.getenv("SECRET_KEY"), algorithms=["HS256"])
-        user_id = int(payload.get("sub"))
-        user = db.query(User).filter(User.id == user_id).first()
+        user_id = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Token missing subject claim")
+        user = db.query(User).filter(User.id == int(user_id)).first()
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
         return user
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
  
 # ─── Gemini Vision Scorer ─────────────────────────────────────────────────────
  
 def score_task_with_gemini(category: str, task: str, image_base64: str) -> dict:
+    """
+    Sends the image + task to Gemini and returns a score (0.0–1.0) + feedback string.
+    Falls back gracefully if Gemini returns malformed JSON.
+    """
+    # Decode base64 — strip any accidental whitespace/newlines Swift may have added
     try:
-        image_bytes = base64.b64decode(image_base64)
+        clean_b64 = image_base64.replace("\n", "").replace("\r", "").strip()
+        image_bytes = base64.b64decode(clean_b64)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid base64 image data")
  
@@ -116,7 +143,7 @@ Task: {task}
  
 Look at the photo and decide how well they completed the task.
  
-Reply ONLY with a JSON object in this exact format, no other text:
+Reply ONLY with a valid JSON object in this exact format, no markdown, no extra text:
 {{
   "score": <number between 0.0 and 1.0>,
   "feedback": "<one encouraging sentence about what you see>"
@@ -133,43 +160,50 @@ Scoring guide:
         response = gemini.generate_content([prompt, image_part])
         raw = response.text.strip()
  
+        # Strip markdown code fences if Gemini wraps its response anyway
         if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
+            lines = raw.split("\n")
+            raw = "\n".join(lines[1:-1]).strip()
  
         result = json.loads(raw)
         score = max(0.0, min(1.0, float(result["score"])))
-        feedback = str(result.get("feedback", "Keep it up!"))
+        feedback = str(result.get("feedback", "Keep building those habits!"))
         return {"score": score, "feedback": feedback}
  
     except json.JSONDecodeError:
+        # Gemini response wasn't valid JSON — give a neutral score and carry on
         return {"score": 0.5, "feedback": "Task received! Keep building those habits."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gemini error: {str(e)}")
  
 # ─── Routes ───────────────────────────────────────────────────────────────────
  
+@router.get("/categories")
+def get_categories():
+    """Returns all valid habit categories."""
+    return {
+        "categories": VALID_CATEGORIES,
+        "total": len(VALID_CATEGORIES)
+    }
+ 
+ 
 @router.post("/generate")
 def generate_tasks(
     request: TaskGenerateRequest,
-    token: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
 ):
-    user = get_current_user(token, db)
- 
-    valid_categories = list(DEFAULT_TASKS.keys())
-    invalid = [c for c in request.categories if c not in valid_categories]
+    """
+    Given a list of categories, returns one random task per category.
+    """
+    invalid = [c for c in request.categories if c not in VALID_CATEGORIES]
     if invalid:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid categories: {invalid}. Must be one of {valid_categories}"
+            detail=f"Invalid categories: {invalid}. Valid options: {VALID_CATEGORIES}"
         )
  
-    tasks = {}
-    for category in request.categories:
-        tasks[category] = random.choice(DEFAULT_TASKS[category])
+    tasks = {category: random.choice(DEFAULT_TASKS[category]) for category in request.categories}
  
     return {
         "user_id": user.id,
@@ -181,10 +215,19 @@ def generate_tasks(
 @router.post("/complete")
 def complete_task(
     request: TaskCompleteRequest,
-    token: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
 ):
-    user = get_current_user(token, db)
+    """
+    Accepts a completed task + photo, scores it with Gemini,
+    saves a HabitLog, and updates the user's AvatarState morph value.
+    """
+    # Validate category
+    if request.category not in VALID_CATEGORIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid category '{request.category}'. Valid options: {VALID_CATEGORIES}"
+        )
  
     # Score the photo with Gemini
     result = score_task_with_gemini(request.category, request.task, request.image)
@@ -201,36 +244,39 @@ def complete_task(
     db.add(habit_log)
  
     # Update the avatar morph for this category
-    # Max increase is 0.01 (1%) per task, scaled by Gemini score
-    # score 1.0 -> +0.010, score 0.5 -> +0.005, score 0.2 -> +0.002
+    # score 1.0 -> +0.010 | score 0.5 -> +0.005 | score 0.2 -> +0.002
     avatar = db.query(AvatarState).filter(AvatarState.user_id == user.id).first()
-    morph_increase = 0.0
-    new_morph_value = None
-    if avatar:
-        morph_field = f"{request.category}_morph"
-        current = getattr(avatar, morph_field)
-        morph_increase = round(score * 0.01, 4)
-        new_morph_value = min(round(current + morph_increase, 4), 1.0)
-        setattr(avatar, morph_field, new_morph_value)
  
+    if not avatar:
+        raise HTTPException(
+            status_code=404,
+            detail="AvatarState not found for this user. Ensure it is created during signup."
+        )
+ 
+    morph_field = f"{request.category}_morph"
+ 
+    if not hasattr(avatar, morph_field):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Avatar has no morph field for category '{request.category}'"
+        )
+ 
+    current_morph = getattr(avatar, morph_field)
+    morph_increase = round(score * 0.01, 4)
+    new_morph_value = min(round(current_morph + morph_increase, 4), 1.0)
+    setattr(avatar, morph_field, new_morph_value)
+ 
+    # Commit everything together so either both save or neither does
     db.commit()
+    db.refresh(avatar)
  
     return {
         "message": "Task completed successfully",
         "category": request.category,
         "task": request.task,
-        "score": score,                     # 0.0-1.0 Gemini rating
-        "morph_increase": morph_increase,   # how much avatar moved (max 0.01)
-        "new_morph_value": new_morph_value, # current avatar value for this category
+        "score": score,                     # 0.0–1.0 Gemini rating
+        "morph_increase": morph_increase,   # how much the avatar moved (max 0.01)
+        "new_morph_value": new_morph_value, # updated avatar value for this category
         "feedback": feedback
     }
- 
- 
-@router.get("/categories")
-def get_categories():
-    return {
-        "categories": list(DEFAULT_TASKS.keys()),
-        "total": len(DEFAULT_TASKS)
-    }
-
 # 
