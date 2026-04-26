@@ -1,20 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
 import os
 import random
 import base64
 import json
 import google.generativeai as genai
 from database import get_db
-from models import User, HabitLog
+from models import User, HabitLog, AvatarState
  
 router = APIRouter(prefix="/tasks", tags=["tasks"])
  
-# Configure Gemini — set GEMINI_API_KEY in your .env
+# Configure Gemini
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-gemini = genai.GenerativeModel("gemini-2.5-flash")  # flash is fast + cheap, fine for hackathon
+gemini = genai.GenerativeModel("gemini-1.5-flash")
  
 # ─── Default Tasks ────────────────────────────────────────────────────────────
  
@@ -98,11 +98,6 @@ def get_current_user(token: str, db: Session):
 # ─── Gemini Vision Scorer ─────────────────────────────────────────────────────
  
 def score_task_with_gemini(category: str, task: str, image_base64: str) -> dict:
-    """
-    Sends the photo + task description to Gemini.
-    Returns { score: float (0.0–1.0), feedback: str }
-    """
-    # Decode base64 → raw bytes for Gemini
     try:
         image_bytes = base64.b64decode(image_base64)
     except Exception:
@@ -128,17 +123,16 @@ Reply ONLY with a JSON object in this exact format, no other text:
 }}
  
 Scoring guide:
-- 0.9–1.0: Photo clearly and directly shows the completed task
-- 0.6–0.8: Photo is related but doesn't fully prove completion
-- 0.3–0.5: Photo is loosely related or unclear
-- 0.0–0.2: Photo has nothing to do with the task
+- 0.9-1.0: Photo clearly and directly shows the completed task
+- 0.6-0.8: Photo is related but doesn't fully prove completion
+- 0.3-0.5: Photo is loosely related or unclear
+- 0.0-0.2: Photo has nothing to do with the task
 """
  
     try:
         response = gemini.generate_content([prompt, image_part])
         raw = response.text.strip()
  
-        # Strip markdown code fences if Gemini wraps in ```json
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -146,15 +140,11 @@ Scoring guide:
             raw = raw.strip()
  
         result = json.loads(raw)
- 
-        # Clamp score to 0.0–1.0 just in case
         score = max(0.0, min(1.0, float(result["score"])))
         feedback = str(result.get("feedback", "Keep it up!"))
- 
         return {"score": score, "feedback": feedback}
  
     except json.JSONDecodeError:
-        # Gemini returned something unparseable — give a safe default
         return {"score": 0.5, "feedback": "Task received! Keep building those habits."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gemini error: {str(e)}")
@@ -201,7 +191,7 @@ def complete_task(
     score = result["score"]
     feedback = result["feedback"]
  
-    # Save to DB
+    # Save habit log
     habit_log = HabitLog(
         user_id=user.id,
         habit_category=request.category,
@@ -209,14 +199,30 @@ def complete_task(
         health_score=score
     )
     db.add(habit_log)
+ 
+    # Update the avatar morph for this category
+    # Max increase is 0.01 (1%) per task, scaled by Gemini score
+    # score 1.0 -> +0.010, score 0.5 -> +0.005, score 0.2 -> +0.002
+    avatar = db.query(AvatarState).filter(AvatarState.user_id == user.id).first()
+    morph_increase = 0.0
+    new_morph_value = None
+    if avatar:
+        morph_field = f"{request.category}_morph"
+        current = getattr(avatar, morph_field)
+        morph_increase = round(score * 0.01, 4)
+        new_morph_value = min(round(current + morph_increase, 4), 1.0)
+        setattr(avatar, morph_field, new_morph_value)
+ 
     db.commit()
  
     return {
         "message": "Task completed successfully",
         "category": request.category,
         "task": request.task,
-        "score": score,       # 0.0–1.0 → feed this into your 3D model
-        "feedback": feedback  # show this to the user
+        "score": score,                     # 0.0-1.0 Gemini rating
+        "morph_increase": morph_increase,   # how much avatar moved (max 0.01)
+        "new_morph_value": new_morph_value, # current avatar value for this category
+        "feedback": feedback
     }
  
  
@@ -226,5 +232,5 @@ def get_categories():
         "categories": list(DEFAULT_TASKS.keys()),
         "total": len(DEFAULT_TASKS)
     }
- 
-#  pip install google-generativeai
+
+# 
