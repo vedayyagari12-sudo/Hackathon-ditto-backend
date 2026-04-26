@@ -93,7 +93,7 @@ def setup_onboarding(
         ai_clone = AIClone(user_id=user.id)
         db.add(ai_clone)
     for category in request.categories:
-        setattr(ai_clone, f"{category}_morph", 0.2)
+        setattr(ai_clone, f"{category}_morph", current_scores[category])
 
     db.commit()
 
